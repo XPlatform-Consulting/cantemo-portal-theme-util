@@ -1,0 +1,92 @@
+#!/bin/ruby
+# yum install ruby ruby-devel postgresql-devel
+# gem install inifile
+# gem install pg
+def require_with_grace(r) require r; rescue LoadError; block_given? ? yield : abort("#{$!.message}\n\n try executing: gem install '#{r}'") end
+require 'fileutils'
+require 'optparse'
+require 'pp'
+require 'shellwords'
+
+options = {
+  :portal_conf_file_path => '/etc/cantemo/portal/portal.conf',
+  :source_theme_name => 'core'
+}
+
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: #{File.basename($0)} [options]"
+  opts.on('-n', '--name NAME', 'The name of the new theme.') { |v| options[:target_theme_name] = v }
+  # opts.on('-s', '--source NAME', 'The name of the theme to copy.') { |v| options[:source_theme_name] = v }
+  opts.on('-h', '--help', 'Display this screen.') { puts opts; exit }
+end
+optparse.parse!
+
+target_theme_name = options[:target_theme_name]
+source_theme_name = options[:source_theme_name]
+portal_conf_file_path = options[:portal_conf_file_path]
+
+abort('new theme name is a required argument.') unless target_theme_name
+
+require_with_grace 'inifile'
+# require_with_grace 'pg'
+
+
+# Under the following directories setup a directory with your theme:
+# - /opt/cantemo/portal/portal_themes/
+# - /opt/cantemo/portal/portal_media/img
+# - /opt/cantemo/portal/portal_media/js
+
+base_path = '/opt/cantemo/portal/'
+
+theme_dir_relative_path = "portal_themes/#{target_theme_name}"
+static_files_relative_path = File.join(theme_dir_relative_path, 'static')
+media_dir_relative_path = "portal_media/#{target_theme_name}"
+media_img_dir_relative_path = File.join(media_dir_relative_path, 'img', target_theme_name)
+media_js_dir_relative_path = File.join(media_dir_relative_path, 'js', target_theme_name)
+
+relative_paths_to_create = [
+  theme_dir_relative_path, media_dir_relative_path, media_img_dir_relative_path, media_js_dir_relative_path
+]
+
+paths_to_create = relative_paths_to_create.map { |v| File.join(base_path, v) }
+
+puts "Paths to Create: #{paths_to_create}"
+
+portal_conf = IniFile.load(portal_conf_file_path)
+# pp portal_conf
+database_config = portal_conf['database']
+portal_paths = portal_conf['paths']
+
+new_theme_sql = <<-SQL
+  insert into "public"."themes_theme" (
+    "template_string",
+    "logo_height",
+    "is_default",
+    "logo_width",
+    "css",
+    "status",
+    "title"
+  ) values (
+    '{% themeextends "base.html" %} {% block title %} {% endblock %} {% block theme %} {% block navigation %}{% themeinclude ''includes/navigation.html'' %}{% endblock %} <div id="main"> {% block body %} {% block heading %}{% endblock heading %} <div id="content"> {% block content %} {% endblock content %} </div> {% endblock body %} </div> {% block footer %}{% themeinclude ''includes/footer.html'' %}{% endblock %} {% endblock %}', 
+    '32',
+    'f',
+    '225',
+    '/sitemedia/css/portal-onyx.css',
+    '3',
+    '#{target_theme_name}'
+  )
+SQL
+new_theme_sql_file_name = "#{target_theme_name}_theme_install.sql"
+new_theme_install_file_name = "#{target_theme_name}_theme_install.sh"
+sql_command = [ 'psql', '--host', database_config['DATABASE_HOST'], '--port', database_config['DATABASE_PORT'],
+                '--username', database_config['DATABASE_USER'], '--dbname', database_config['DATABASE_NAME'],
+                '--file', new_theme_sql_file_name ].shelljoin
+
+
+commands = [ '#!/bin/bash' ]
+paths_to_create.each { |p| commands << %(mkdir -p "#{p}") }
+paths_to_create.each { |p| commands << %(chown -R www-data:www-data "#{p}") }
+commands << sql_command
+File.write(new_theme_sql_file_name, new_theme_sql)
+File.write(new_theme_install_file_name, commands.join("\n") + "\n")
+File.chmod(0700, new_theme_install_file_name)
